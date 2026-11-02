@@ -1,0 +1,17 @@
+# 数据与产物永不入库（AGENTS.md §10）
+data/
+outputs/
+*.mat
+*.npz
+*.csv
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE / 系统
+.DS_Store
+.idea/
+.vscode/
