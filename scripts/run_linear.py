@@ -50,6 +50,10 @@ def build_parser():
     p.add_argument("--no-hmm", action="store_true")
     p.add_argument("--p-switch", type=float, default=0.001)
     p.add_argument("--temp", type=float, default=1.0)
+    p.add_argument("--no-stream", action="store_true",
+                   help="关掉流式训练（会把全部被试读进内存，仅小数据用）")
+    p.add_argument("--limit-per-dataset", type=int, default=None,
+                   help="每个数据集只用前 N 个被试（调试用）")
     return p
 
 
@@ -134,17 +138,26 @@ def main(argv=None):
         model = pipeline.SRModel.load(args.load)
         print("已加载模型: %s" % args.load)
     elif args.train:
-        subjects = []
-        for key in args.train:
-            subs = cnd.load_dataset(args.data_root, key, cfg.prefix)
-            print("载入 %s: %d 被试" % (key, len(subs)))
-            subjects.extend(subs)
-        print("合并训练中（%d 被试, %d 通道交集）..." % (
-            len(subjects), len(registry.channel_intersection(subjects))))
-        model = pipeline.train_on_subjects(subjects, cfg)
+        if args.no_stream:
+            subjects = []
+            for key in args.train:
+                subs = cnd.load_dataset(args.data_root, key, cfg.prefix)
+                print("载入 %s: %d 被试" % (key, len(subs)))
+                subjects.extend(subs)
+            print("合并训练中（%d 被试, %d 通道交集）..." % (
+                len(subjects), len(registry.channel_intersection(subjects))))
+            model = pipeline.train_on_subjects(subjects, cfg)
+        else:
+            # 流式：三遍扫描磁盘，内存峰值 = 单被试（5 库合并必需）
+            specs = [(args.data_root, k, cfg.prefix, None) for k in args.train]
+            print("流式合并训练: %s（每数据集上限 %s）" % (
+                " ".join(args.train), args.limit_per_dataset or "无"))
+            model = pipeline.train_streaming(
+                specs, cfg, limit_per_dataset=args.limit_per_dataset)
         model_path = os.path.join(args.out, "model.npz")
         model.save(model_path)
-        print("模型已存: %s" % model_path)
+        print("模型已存: %s（%d 通道, HMM 常数 mean=%.3f sigma=%.3f）" % (
+            model_path, len(model.channels), model.mean_global, model.sigma_global))
     else:
         raise SystemExit("需要 --train 或 --load")
 

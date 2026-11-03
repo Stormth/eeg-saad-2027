@@ -208,6 +208,35 @@ def test_pipeline():
                           np.concatenate([r["pred"] for r in r2]))
     assert abs(a1 - a2) < 0.02, "合成切换不应改变 Acc: %.3f vs %.3f" % (a1, a2)
 
+    # 流式训练（5 库合并用）必须与一次性训练等价
+    by_key = {"A": subjects[:1], "B": subjects[1:2]}
+    specs = [("fake", k, "pre_", [1]) for k in by_key]
+
+    def loader(_root, key, _j, _prefix):
+        import copy as _copy
+        return _copy.deepcopy(by_key[key][0])
+
+    model_s = pipeline.train_streaming(specs, cfg, loader=loader, log=lambda *a: None)
+    assert model_s.channels == model.channels, (model_s.channels, model.channels)
+    r = np.corrcoef(model_s.b, model.b)[0, 1]
+    assert r > 0.99, "流式训练权重与一次性训练不一致 corr=%.4f" % r
+    assert abs(model_s.mean_global - model.mean_global) < 0.05
+    res_s = pipeline.run_subject(model_s, subjects[1], cfg)
+    acc_s = metrics.accuracy(np.concatenate([x["true"] for x in res_s]),
+                             np.concatenate([x["pred"] for x in res_s]))
+    assert acc_s > 0.7, "流式模型 Acc 过低: %.3f" % acc_s
+
+    # 前缀自动探测：DTU 是 pre_（32 Hz），其余数据集无前缀（128 Hz）
+    with tempfile.TemporaryDirectory() as td:
+        for name in ("pre_dataSub1.mat", "pre_dataStim1.mat"):
+            open(os.path.join(td, name), "w").close()
+        _e, _s, used = cnd._resolve_pair(td, 1, "")
+        assert used == "pre_", used
+        for name in ("dataSub2.mat", "dataStim2.mat"):
+            open(os.path.join(td, name), "w").close()
+        _e, _s, used = cnd._resolve_pair(td, 2, "pre_")
+        assert used == "", used
+
 
 def main():
     passed = 0

@@ -174,16 +174,33 @@ def _channel_names(rec, names):
     return out
 
 
+def _resolve_pair(folder, subject, prefix):
+    """同一前缀下成对存在才算命中（DTU 是 pre_ + 32 Hz，其余数据集无前缀 + 128 Hz）。"""
+    stems = ("dataSub%d.mat" % subject, "dataStim%d.mat" % subject)
+    order = ([prefix] if prefix else []) + ["pre_", ""]
+    seen = []
+    for p in order:
+        if p in seen:
+            continue
+        seen.append(p)
+        cand = [os.path.join(folder, p + s) for s in stems]
+        if all(os.path.exists(c) for c in cand):
+            return cand[0], cand[1], p
+    raise FileNotFoundError(
+        "%s: 找不到被试 %d 的 dataSub/dataStim 配对（试过前缀 %s）"
+        % (folder, subject, seen))
+
+
 def load_subject(data_root, key, subject, prefix="pre_"):
     """读单个被试：dataCND/{prefix}dataSub{j}.mat + {prefix}dataStim{j}.mat。
 
+    prefix 只作首选，缺失时自动回退到 pre_ / 无前缀。
     att/包络/EEG 长度不一致时自动重采样对齐到 EEG 长度。
     """
     from .registry import folder_for
 
     folder = folder_for(data_root, key)
-    eeg_path = os.path.join(folder, "%sdataSub%d.mat" % (prefix, subject))
-    stim_path = os.path.join(folder, "%sdataStim%d.mat" % (prefix, subject))
+    eeg_path, stim_path, used_prefix = _resolve_pair(folder, subject, prefix)
 
     eeg_rec = _load_struct(eeg_path, ["fs", "data"])
     stim_rec = _load_struct(stim_path, ["names", "data"])
@@ -294,7 +311,7 @@ def load_subject(data_root, key, subject, prefix="pre_"):
 
 
 def list_subjects(data_root, key, prefix="pre_"):
-    """扫描 dataCND 里实际存在的被试编号。"""
+    """扫描 dataCND 里实际存在的被试编号（前缀无关，DTU 与 128 Hz 库混存也能列全）。"""
     from .registry import folder_for
 
     folder = folder_for(data_root, key)
@@ -303,7 +320,7 @@ def list_subjects(data_root, key, prefix="pre_"):
         return sorted(subs)
     import glob as _glob
 
-    for p in _glob.glob(os.path.join(folder, "%sdataSub*.mat" % prefix)):
+    for p in _glob.glob(os.path.join(folder, "*dataSub*.mat")):
         m = re.search(r"dataSub(\d+)\.mat$", os.path.basename(p))
         if m:
             subs.add(int(m.group(1)))

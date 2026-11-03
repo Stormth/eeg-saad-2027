@@ -214,6 +214,116 @@ def train_on_subjects(subjects, cfg):
     return model
 
 
+def _make_model(b, channels, mu, sd, fs, mean_g, sigma_g, cfg):
+    return SRModel(b, channels, mu, sd, cfg.lags, fs, mean_g, sigma_g,
+                   {"lags": list(cfg.lags), "window": cfg.window, "hop": cfg.hop,
+                    "lookahead": cfg.lookahead, "reg": cfg.reg,
+                    "target_fs": cfg.target_fs, "hmm": cfg.hmm,
+                    "p_switch": cfg.p_switch, "mean_diff": cfg.mean_diff,
+                    "sigma_global": cfg.sigma_global, "mean_global": cfg.mean_global,
+                    "temp": cfg.temp})
+
+
+def _iter_spec(specs, limit_per_dataset=None, loader=None):
+    """逐个产出 (key, Subject)。specs: [(data_root, key, prefix, subjects|None), ...]
+
+    默认用 cnd.load_subject 从磁盘按需加载 —— 每次只有一个被试在内存里。
+    内存与数据总量无关（P0 五库合并训练必需）。
+    """
+    from . import cnd
+
+    for root, key, prefix, subs in specs:
+        ids = subs if subs else cnd.list_subjects(root, key, prefix)
+        if limit_per_dataset:
+            ids = list(ids)[:limit_per_dataset]
+        for j in ids:
+            if loader is None:
+                yield key, cnd.load_subject(root, key, j, prefix)
+            else:
+                yield key, loader(root, key, j, prefix)
+
+
+def train_streaming(specs, cfg, limit_per_dataset=None, const_subjects=3,
+                    loader=None, log=print):
+    """流式合并训练（AGENTS.md §9 P0-3 的正确姿势）。
+
+    specs = [("data", "DTU", "pre_", None), ("data", "KUL", "pre_", None), ...]
+
+    分三遍扫描磁盘，内存峰值 = 单个被试：
+      1) 通道交集
+      2) 通道 z-score 统计量
+      3) 累加充分统计量 → 求解 b
+    第 4 遍只在前 const_subjects 个被试上估计 HMM 归一化常数（§5.6）。
+    """
+    # pass 1：通道交集（保持第一个被试的通道顺序）
+    channels = None
+    n_subjects = 0
+    for _, s in _iter_spec(specs, limit_per_dataset, loader):
+        if channels is None:
+            channels = list(s.channels)
+        else:
+            allowed = set(s.channels)
+            channels = [c for c in channels if c in allowed]
+        n_subjects += 1
+        del s
+    if not channels:
+        raise ValueError("训练被试之间没有通道交集（检查数据集通道命名）")
+    log("通道交集: %d 通道（%d 被试）" % (len(channels), n_subjects))
+
+    # pass 2：标准化统计量
+    std = ChannelStandardizer()
+    for _, s in _iter_spec(specs, limit_per_dataset, loader):
+        s.select_channels(channels)
+        for e in s.eeg:
+            std.observe(e)
+        del s
+    std.finalize()
+
+    # pass 3：充分统计量
+    dec = LinearDecoder(len(channels) * len(cfg.lags))
+    fs0 = None
+    for _, s in _iter_spec(specs, limit_per_dataset, loader):
+        s.select_channels(channels)
+        fs0 = fs0 or s.fs
+        step = max(1, int(round(s.fs / cfg.target_fs)))
+        for eeg, env, att in zip(s.eeg, s.env, s.att):
+            if att is None:
+                continue
+            eeg_s = std.apply(eeg)
+            D, t0, t1, _ = time_delay_embed(eeg_s, cfg.lags, s.fs)
+            rows = np.arange(0, t1, step)
+            att_seg = np.asarray(att).reshape(-1)[rows]
+            dec.observe(D[rows], env[rows, att_seg - 1])
+        del s
+    b = dec.solve(cfg.reg)
+
+    # pass 4：HMM 归一化常数（只用前 const_subjects 个被试，§5.6 必须来自训练集）
+    all_corr, all_att = [], []
+    for i, (_, s) in enumerate(_iter_spec(specs, const_subjects, loader)):
+        s.select_channels(channels)
+        eeg_std = [(e - std.mu) / std.sd for e in s.eeg]
+        for eeg_s, env, att in zip(eeg_std, s.env, s.att):
+            if att is None:
+                continue
+            D, t0, t1, _ = time_delay_embed(eeg_s, cfg.lags, s.fs)
+            pred = D @ b
+            corr, starts, seg, _h = _trial_window_corrs(pred, env, s.fs,
+                                                        cfg.window, cfg.hop)
+            att_s = np.asarray(att).reshape(-1)
+            for st in starts:
+                vals, cnt = np.unique(att_s[st:st + seg], return_counts=True)
+                all_att.append(int(vals[np.argmax(cnt)]) - 1)
+            all_corr.append(corr)
+        del s
+    if all_corr:
+        mean_g, sigma_g = normalisation_constants(np.concatenate(all_corr, axis=0),
+                                                  np.array(all_att))
+    else:
+        mean_g, sigma_g = cfg.mean_global, cfg.sigma_global
+
+    return _make_model(b, channels, std.mu, std.sd, fs0, mean_g, sigma_g, cfg)
+
+
 def run_subject(model, subject, cfg=None, hmm=None):
     """对单个被试做逐样本判决。
 

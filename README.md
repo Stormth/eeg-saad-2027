@@ -14,6 +14,8 @@ ICASSP 2027 Signal Processing Grand Challenge **GC-11: EEG-sAAD**（从脑电解
 
 ## 快速开始
 
+**在远程 SSH 服务器上复现 baseline → 看 [docs/REMOTE.md](docs/REMOTE.md)**（含数据放置、验收数字、排错表）。
+
 ```bash
 # 自检（无需数据，10 秒）
 python tests/test_all.py
@@ -34,6 +36,10 @@ python scripts/run_linear.py --data-root data \
 ```
 
 依赖：`python >= 3.9`、`numpy`、`scipy`。无需 GPU。
+
+合并多个数据集训练时默认**流式**处理（三遍扫描磁盘，内存峰值 = 单被试）；`--no-stream` 会一次性读入内存，只适合小数据。
+`--prefix` 会自动探测（DTU 的 `pre_` 与 128 Hz 库的无前缀可混存）。
+`--limit-per-dataset N` 用于快速冒烟。
 
 ## 结构
 
